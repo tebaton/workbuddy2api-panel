@@ -144,7 +144,18 @@ func NewHandler(cfg Config) *Handler {
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
+	// Anthropic Messages 兼容对话转发（anthropic_handler.go）：/v1/messages 是
+	// Anthropic 模型对话标准路径（README 早已预留）；count_tokens 依赖 Go 1.22
+	// mux 最长匹配，不被 /v1/messages 吞掉。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuthAnthropic(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuthAnthropic(h.anthropicCountTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/models/{id}", h.withAuth(h.modelsRetrieve))
+	// Anthropic 端点全集里明确不实现的（设计 §非目标）：规范 501（Anthropic 错误
+	// 形态），命中子路径也一并拦截。
+	for _, p := range []string{"/v1/messages/batches", "/v1/messages/batches/{rest...}", "/v1/files", "/v1/files/{rest...}", "/v1/complete"} {
+		h.mux.HandleFunc(p, h.anthropicNotImplemented)
+	}
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -190,7 +201,8 @@ func (h *Handler) tracedRequest(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
-	return r.URL.Path == "/v1/chat/completions" || isSearchPath(r.URL.Path)
+	return r.URL.Path == "/v1/chat/completions" || isSearchPath(r.URL.Path) ||
+		r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/messages/count_tokens"
 }
 
 // isSearchPath 判断是否为搜索端点。
@@ -307,10 +319,66 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	data := h.modelList()
+	list := make([]map[string]any, 0, len(data))
+	var first, last string
+	for _, e := range data {
+		list = append(list, anthropicModelEntry(e))
+		if id, _ := e["id"].(string); id != "" {
+			if first == "" {
+				first = id
+			}
+			last = id
+		}
+	}
+	// 双形态响应：OpenAI（object/data/条目 object:"model"）与 Anthropic
+	// （条目 type/display_name/created_at + 根 has_more/first_id/last_id）共用
+	// 一份条目——纯增量字段，OpenAI 客户端解析不受影响。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   h.modelList(),
+		"object":   "list",
+		"data":     list,
+		"has_more": false,
+		"first_id": first,
+		"last_id":  last,
 	})
+}
+
+// anthropicModelEntry 在既有条目上补 Anthropic 必需字段（不覆盖已有键）。
+func anthropicModelEntry(e map[string]any) map[string]any {
+	if _, ok := e["type"]; !ok {
+		e["type"] = "model"
+	}
+	if _, ok := e["display_name"]; !ok {
+		if name, _ := e["name"].(string); name != "" {
+			e["display_name"] = name
+		} else {
+			e["display_name"] = e["id"]
+		}
+	}
+	if _, ok := e["created_at"]; !ok {
+		if c, ok := e["created"]; ok {
+			e["created_at"] = c
+		} else {
+			e["created_at"] = 1753600000
+		}
+	}
+	return e
+}
+
+// modelsRetrieve GET /v1/models/{id}（Anthropic models.retrieve 形态，条目同双形态）。
+func (h *Handler) modelsRetrieve(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeMessagesError(w, http.StatusNotFound, "not_found_error", "model not found")
+		return
+	}
+	for _, e := range h.modelList() {
+		if cur, _ := e["id"].(string); cur == id {
+			writeJSON(w, http.StatusOK, anthropicModelEntry(e))
+			return
+		}
+	}
+	writeMessagesError(w, http.StatusNotFound, "not_found_error", "model not found: "+id)
 }
 
 // fmtCreditsPrefix 从上游 credits 原文提取倍率并格式化为 "[x0.05 credit]"。

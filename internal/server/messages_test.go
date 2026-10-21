@@ -271,8 +271,10 @@ func TestMessagesSearchUpstreamErrorShape(t *testing.T) {
 	}
 }
 
-// TestMessagesRouteDoesNotShadowV1Messages 断言搜索端点没有占用 /v1/messages
-// （该路径保留给 Anthropic 模型对话）。
+// TestMessagesRouteDoesNotShadowV1Messages 断言搜索端点没有占用 /v1/messages：
+// 该路径现由 Anthropic 模型对话端点（anthropic_handler.go）提供服务。校验失败的
+// 请求必须得到 **chat 路径的校验错误**（max_tokens 必填），而不是搜索端点的
+// 专属文案——打出搜索文案即意味着搜索 handler 把路径抢走了。
 func TestMessagesRouteDoesNotShadowV1Messages(t *testing.T) {
 	up := newSearchUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("不得打上游")
@@ -283,8 +285,15 @@ func TestMessagesRouteDoesNotShadowV1Messages(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("POST /v1/messages code=%d want 404（该路径留给模型对话）", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/messages code=%d want 400（chat 路径的校验拒绝）", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "web_search") {
+		t.Errorf("不得由搜索端点处理: %s", body)
+	}
+	if !strings.Contains(body, "invalid_request_error") {
+		t.Errorf("应由 chat 端点返回 Anthropic 校验错误: %s", body)
 	}
 }
 
