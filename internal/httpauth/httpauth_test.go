@@ -50,6 +50,37 @@ func TestVerifyBearerWithoutHeaderStillCompares(t *testing.T) {
 	}
 }
 
+// TestVerifyXAPIKey Anthropic 协议标准鉴权头（x-api-key）的校验，语义与
+// VerifyBearer 完全同口径：空 key 恒放行；摘要 + 常量时间比较；缺头不误放。
+func TestVerifyXAPIKey(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+		apiK string // x-api-key 头的值（空 = 不带该头）
+		want bool
+	}{
+		{"空 key 放行（未启用鉴权）", "", "", true},
+		{"空 key 缺头也放行", "", "", true},
+		{"正确 key", "sk-abc123", "sk-abc123", true},
+		{"错误 key", "sk-abc123", "sk-wrong", false},
+		{"缺 x-api-key 头", "sk-abc123", "", false},
+		{"空串头视同缺头", "sk-abc123", "", false},
+		{"前缀相同但内容短", "sk-abc123", "sk-abc12", false},
+		{"前缀相同但内容长", "sk-abc123", "sk-abc1234", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/v1/messages", nil)
+			if c.apiK != "" {
+				r.Header.Set("x-api-key", c.apiK)
+			}
+			if got := VerifyXAPIKey(r, c.key); got != c.want {
+				t.Errorf("VerifyXAPIKey(key=%q, x-api-key=%q) = %v, want %v", c.key, c.apiK, got, c.want)
+			}
+		})
+	}
+}
+
 func TestDigestIsFixedLength(t *testing.T) {
 	// 不同长度输入摘要后应等长（这是常量时间比较的前提）
 	if len(digest("")) != len(digest("a-much-longer-secret-value")) {
