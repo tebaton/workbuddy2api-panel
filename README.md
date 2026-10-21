@@ -77,6 +77,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
 | 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 在途租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
+| 🤖 **Anthropic 兼容对话** | `POST /v1/messages` 原生 Anthropic Messages 协议（流式 + 非流式 + count_tokens），Claude Code 经 `ANTHROPIC_BASE_URL` 零改造接入；边缘协议转换复用既有 chat 管线（选号 / 粘性 / 冷却 / DSML 修复 / 记账全同口径），同账号同会话内上游前缀缓存可命中（`cache_read_input_tokens` 可观测） |
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
@@ -713,6 +714,44 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 
 **余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
 
+### Anthropic Messages 兼容 `POST /v1/messages`
+
+网关原生提供 **Anthropic Messages 协议**入口（流式 + 非流式），Claude Code 等
+Anthropic 协议客户端零改造接入。实现为**边缘协议转换**：请求经纯函数转换为
+OpenAI 形态后复用既有 chat 管线（提示词体系 / 账号池轮转 / 会话粘性 / 冷却熔断 /
+DSML 原生工具标记还原 / 日志与用量记账全部同口径），响应实时转写为 Anthropic
+事件流（`message_start` / `content_block_*` / `message_delta` / `message_stop`）。
+
+| 端点 | 说明 |
+|---|---|
+| `POST /v1/messages` | 对话（`stream` true/false）；text / image / thinking / tool_use / tool_result 全块类型 |
+| `POST /v1/messages/count_tokens` | 本地确定性估算（刻意略微高估：Claude Code 用它判断自动压缩阈值，高估落在安全侧） |
+| `GET /v1/models`、`GET /v1/models/{id}` | Anthropic / OpenAI 双形态（增量字段，两方客户端均可解析） |
+| `/v1/messages/batches*`、`/v1/files*`、`/v1/complete` | 501 `not_implemented_error`（明确不实现，不做本地模拟） |
+
+行为要点：
+
+- **鉴权**：`Authorization: Bearer <api_key>`（`ANTHROPIC_AUTH_TOKEN` 形态）或
+  `x-api-key: <api_key>`（Anthropic SDK 标准头）任一命中即放行；`anthropic-version`
+  不校验、`anthropic-beta` 忽略
+- **模型**：**纯透传**——与 `/v1/chat/completions` 同一套解析语义（`cn:` / `global:`
+  前缀、黑名单、目录校验复用）；`document` 块与 server tools（`web_search_*` 等）
+  返回 400 `invalid_request_error` 点名拒绝
+- **thinking**：请求侧 `thinking` 参数原样透传（接 DeepSeek 思维链注入与 effort
+  降级）；响应侧 `reasoning_content` 转写为 `thinking` 块（signature 为内容哈希
+  派生的合成值，回传时入站剥掉）、`cache_read_input_tokens` 透出上游缓存命中量
+- **缓存**：同账号、同会话内，转换产物逐轮**字节级同前缀**（纯函数 + 排序序列化 +
+  `cc-` 会话键走粘性绑定同账号），上游自动前缀缓存可跨轮命中；账号切换 / 客户端
+  自身改写历史（压缩、丢弃旧 thinking）时缓存冷启动，属预期
+- **Claude Code 接入**：
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:7863
+export ANTHROPIC_API_KEY=<网关 api_key>   # 或 ANTHROPIC_AUTH_TOKEN
+export ANTHROPIC_MODEL=deepseek-v4        # 上游模型名（cn:/global: 前缀可选）
+claude
+```
+
 ## 🖥️ Web 管理面板
 
 内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：
@@ -793,6 +832,9 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/messages` | Bearer 或 `x-api-key`（`api_key` 非空时） | Anthropic Messages 兼容对话；流式/非流式（见[上节](#anthropic-messages-兼容-post-v1messages)） |
+| `POST /v1/messages/count_tokens` | 同上 | 输入 token 本地估算 |
+| `GET /v1/models/{id}` | Bearer（`api_key` 非空时） | 单模型查询（Anthropic / OpenAI 双形态） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
