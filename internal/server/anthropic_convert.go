@@ -268,11 +268,37 @@ func (a *anthropicRequest) convertMessages() ([]map[string]any, error) {
 				return nil, err
 			}
 			out = append(out, msgs...)
+		case "system":
+			// Claude Code 会内联 role:"system" 消息。原位转成 OpenAI system
+			// 消息（挪位/前并会改变既有轮序列化字节，破坏前缀缓存）。
+			text, err := systemBlocksText(blocks)
+			if err != nil {
+				return nil, err
+			}
+			if text != "" {
+				out = append(out, map[string]any{"role": "system", "content": text})
+			}
 		default:
 			return nil, fmt.Errorf("unsupported message role %q", m.Role)
 		}
 	}
 	return out, nil
+}
+
+// systemBlocksText 内联 system 消息的块数组 → 文本（text 块按 "\n\n" 拼接），
+// 产出与纯字符串透传形态对齐（同为 {"role":"system","content":"..."}）。
+// 空文本轮确定性丢弃。
+func systemBlocksText(blocks []anthropicBlock) (string, error) {
+	parts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type != "text" {
+			return "", fmt.Errorf("unsupported system content block type %q", b.Type)
+		}
+		if b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n\n"), nil
 }
 
 // convertAssistantBlocks thinking → reasoning_content（剥 signature）；text →

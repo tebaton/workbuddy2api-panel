@@ -204,6 +204,78 @@ func TestConvertThinkingParamPassthrough(t *testing.T) {
 	}
 }
 
+// TestConvertInlineSystemMessages Claude Code 会内联 role:"system" 消息（字符串
+// 或块数组形态）。原位转成 OpenAI system 消息，不往前合并——挪位/合并会改变
+// 既有轮次的序列化字节，破坏逐轮前缀缓存。空文本轮确定性丢弃。
+func TestConvertInlineSystemMessages(t *testing.T) {
+	req := mustParse(t, `{"model":"m","max_tokens":8,"system":"SYS",
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"system","content":[{"type":"text","text":"inline reminder"}]},
+			{"role":"user","content":"second"},
+			{"role":"system","content":"string form"},
+			{"role":"system","content":[{"type":"text","text":""}]}
+		]}`)
+	out, err := req.ToOpenAI()
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var m map[string]any
+	_ = json.Unmarshal(out, &m)
+	msgs := m["messages"].([]any)
+	want := []struct{ role, content string }{
+		{"system", "SYS"}, // 顶层 system 仍在前
+		{"user", "first"},
+		{"system", "inline reminder"}, // 块数组形态，原位
+		{"user", "second"},
+		{"system", "string form"}, // 字符串形态，原位（既有透传路径）
+		// 空文本轮丢弃，无第 6 条
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("want %d messages got %d: %v", len(want), len(msgs), msgs)
+	}
+	for i, w := range want {
+		got := msgs[i].(map[string]any)
+		if got["role"] != w.role || got["content"] != w.content {
+			t.Fatalf("msg[%d] want %v got %v", i, w, got)
+		}
+	}
+	// 不支持块类型：响亮失败点名 type
+	bad := `{"model":"m","max_tokens":8,"messages":[{"role":"system","content":[{"type":"document","source":{}}]}]}`
+	if _, err := mustParse(t, bad).ToOpenAI(); err == nil || !strings.Contains(err.Error(), "document") {
+		t.Fatalf("system 不支持块必须点名拒绝: %v", err)
+	}
+}
+
+// TestConvertInlineSystemPrefixStable 追加轮里出现内联 system 消息时，messages
+// 数组仍是上一轮的字节级扩展（缓存前缀不断）。
+func TestConvertInlineSystemPrefixStable(t *testing.T) {
+	turn1 := `{"model":"m","max_tokens":8,"messages":[
+		{"role":"user","content":"q1"},
+		{"role":"system","content":[{"type":"text","text":"reminder"}]},
+		{"role":"user","content":"q2"}]}`
+	turn2 := `{"model":"m","max_tokens":8,"messages":[
+		{"role":"user","content":"q1"},
+		{"role":"system","content":[{"type":"text","text":"reminder"}]},
+		{"role":"user","content":"q2"},
+		{"role":"assistant","content":[{"type":"text","text":"a1"}]},
+		{"role":"system","content":[{"type":"text","text":"late reminder"}]},
+		{"role":"user","content":"q3"}]}`
+	b1, err := mustParse(t, turn1).ToOpenAI()
+	if err != nil {
+		t.Fatalf("turn1: %v", err)
+	}
+	b2, err := mustParse(t, turn2).ToOpenAI()
+	if err != nil {
+		t.Fatalf("turn2: %v", err)
+	}
+	seg1 := messagesSegment(t, string(b1))
+	seg2 := messagesSegment(t, string(b2))
+	if !strings.HasPrefix(seg2, seg1) {
+		t.Fatalf("inline system broke byte prefix\nturn1: %s\nturn2: %s", seg1, seg2)
+	}
+}
+
 func TestConversationKeyStable(t *testing.T) {
 	a := mustParse(t, `{"model":"m","max_tokens":8,"system":"S","messages":[{"role":"user","content":"u1"}]}`)
 	b := mustParse(t, `{"model":"m","max_tokens":8,"system":"S","messages":[{"role":"user","content":"u1"}]}`)
