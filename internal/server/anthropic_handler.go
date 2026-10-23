@@ -34,13 +34,16 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeMessagesError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
 		return
 	}
+	dbgDir, dbgID := h.cfg.AnthropicDebugDir, debugRequestID(r)
 	areq, cerr := parseAnthropicRequest(raw)
 	if cerr != nil {
+		dumpAnthropicDebug(dbgDir, dbgID, raw, nil, "phase=parse status=400 message="+cerr.Error(), nil)
 		writeMessagesError(w, http.StatusBadRequest, "invalid_request_error", cerr.Error())
 		return
 	}
 	obody, cerr := areq.ToOpenAI()
 	if cerr != nil {
+		dumpAnthropicDebug(dbgDir, dbgID, raw, nil, "phase=convert status=400 message="+cerr.Error(), nil)
 		writeMessagesError(w, http.StatusBadRequest, "invalid_request_error", cerr.Error())
 		return
 	}
@@ -54,6 +57,11 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	tr := newAnthropicTranslator(w, areq.Model)
 	h.chatCompletions(tr, sr)
 	tr.Finish()
+	if note, body, failed := tr.debugCapture(); failed {
+		dumpAnthropicDebug(dbgDir, dbgID, raw, obody, note, body)
+	} else {
+		dumpAnthropicDebug(dbgDir, dbgID, raw, obody, "", nil)
+	}
 }
 
 // anthropicCountTokens POST /v1/messages/count_tokens：本地确定性估算，不打上游。

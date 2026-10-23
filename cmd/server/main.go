@@ -284,6 +284,9 @@ func main() {
 	} else {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
+	if cfg.Logging.AnthropicDebugDir != "" {
+		log.Printf("[debug] /v1/messages 排障转储已启用: %s（含完整提示词，排障结束请关闭）", cfg.Logging.AnthropicDebugDir)
+	}
 
 	// 积分历史：把每次真实查到的余额与上一次比对，变动即留痕（新账号首次只建
 	// 基线）。挂载在余额查询路径上（upstream 的余额观察者），签到 / 活跃上报 /
@@ -344,6 +347,8 @@ func main() {
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
+		// /v1/messages 排障转储（logging.anthropic_debug_dir；空 = 关闭）。
+		AnthropicDebugDir: cfg.Logging.AnthropicDebugDir,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 		// 模型黑名单原始条目；运行期以 livecfg 快照为准（热生效），此处供

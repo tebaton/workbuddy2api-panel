@@ -46,6 +46,12 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+		// AnthropicDebugDir Anthropic 兼容端点（/v1/messages）排障转储目录；
+		// 空（缺省）= 关闭。开启后每个请求落盘进站 Anthropic 请求体、转换后的
+		// OpenAI 请求体、错误收尾的上游原始报文，文件名带 request_id（与
+		// request-logs JSONL 互查）。**包含完整提示词与会话历史**，属敏感数据：
+		// 只排障时开启，平时保持空。
+		AnthropicDebugDir string `json:"anthropic_debug_dir"`
 	} `json:"logging"`
 
 	Server struct {

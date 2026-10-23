@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -116,6 +117,20 @@ func (t *anthropicTranslator) Finish() {
 	case trModeError:
 		writeAnthropicErrorBody(t.real, t.status, t.buf)
 	}
+}
+
+// debugCapture 非成功收尾时返回排障材料（anthropic_debug.go 落盘用）：note 声明
+// 失败形态，body 为触发失败的原始报文。须在 Finish() 之后调用（模式才最终判定）。
+func (t *anthropicTranslator) debugCapture() (note string, body []byte, ok bool) {
+	switch {
+	case t.mode == trModeError:
+		return fmt.Sprintf("phase=upstream-buffered status=%d", t.status), t.buf, true
+	case t.sse != nil && t.sse.errPayload != "":
+		return "phase=sse-error-frame status=200(stream)", []byte(t.sse.errPayload), true
+	case t.mode == trModeJSON && len(t.buf) > 0 && !json.Valid(t.buf):
+		return "phase=aggregated-unparseable status=502", t.buf, true
+	}
+	return "", nil, false
 }
 
 // writeAnthropicErrorBody 把 OpenAI 错误 JSON 重渲染为 Anthropic 错误形态。
@@ -271,6 +286,8 @@ type sseState struct {
 	started bool
 	ended   bool
 	line    []byte // 跨 Write 的半行缓冲
+	// errPayload 中途 error 帧的原文（排障转储用；正常收尾为空）。
+	errPayload string
 
 	curKind   string // "" | "thinking" | "text"（thinking/text 顺序开闭）
 	curIdx    int    // 当前 thinking/text 块的 index
@@ -333,6 +350,7 @@ func (s *sseState) handleFrame(payload string) {
 	}
 	if e, ok := frame["error"]; ok && e != nil {
 		// 中途 error 帧：Anthropic 形态 error 事件收尾（无 message_stop）。
+		s.errPayload = payload
 		msg := payload
 		if em, ok := e.(map[string]any); ok {
 			if m, _ := em["message"].(string); m != "" {

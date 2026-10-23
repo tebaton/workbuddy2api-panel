@@ -78,6 +78,11 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// AnthropicDebugDir /v1/messages 排障转储目录（logging.anthropic_debug_dir；
+	// 空 = 关闭）。开启后每个请求落盘进站/转换后请求体与错误收尾的上游报文，
+	// 文件名带 request_id 与 reqlog JSONL 互查。含完整提示词（敏感），只排障开启。
+	AnthropicDebugDir string
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
